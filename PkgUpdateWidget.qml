@@ -35,7 +35,7 @@ PluginComponent {
     // ── Update check functions ────────────────────────────────────────────────
     function checkUpdates() {
         root.dnfChecking = true
-        Proc.runCommand("pkgUpdate.dnf", ["sh", "-c", "dnf list --upgradeable --color=never 2>/dev/null"], (stdout, exitCode) => {
+        Proc.runCommand("pkgUpdate.dnf", ["sh", "-c", "dnf list --upgrades --color=never 2>/dev/null"], (stdout, exitCode) => {
             root.dnfUpdates = parseDnfPackages(stdout)
             root.dnfChecking = false
         }, 100)

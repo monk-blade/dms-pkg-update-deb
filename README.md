@@ -2,6 +2,8 @@
 
 A [DankMaterialShell](https://github.com/AvengeMedia/DankMaterialShell) widget that checks for pending **DNF** and **Flatpak** updates and lets you run them directly from the bar.
 
+![Screenshot](https://raw.githubusercontent.com/rahulmysore23/dms-pkg-update/main/screenshot.png)
+
 ## Features
 
 - Shows total pending update count in the bar pill
@@ -15,15 +17,18 @@ A [DankMaterialShell](https://github.com/AvengeMedia/DankMaterialShell) widget t
 ## Installation
 
 ### From Plugin Registry (Recommended)
+
 ```bash
 dms plugins install pkgUpdate
 # or use the Plugins tab in DMS Settings
 ```
 
 ### Manual
+
 ```bash
 cp -r pkgUpdate ~/.config/DankMaterialShell/plugins/
 ```
+
 Then enable the widget in the DMS Plugins tab and add it to DankBar.
 
 ## Configuration
@@ -43,3 +48,4 @@ Then enable the widget in the DMS Plugins tab and add it to DankBar.
 ## License
 
 MIT
+

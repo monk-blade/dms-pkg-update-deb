@@ -435,7 +435,7 @@ PluginComponent {
         const backend = mode === "auto" ? root.effectiveBackend : mode
         const cmd = backend === "dnf"
             ? "sudo dnf upgrade -y; echo; echo '=== Done. Press Enter to close. ==='; read"
-            : "sudo apt update && sudo apt upgrade -y; echo; echo '=== Done. Press Enter to close. ==='; read"
+            : "aptdcon --refresh && sudo apt -o APT::Get::Always-Include-Phased-Updates=true upgrade -y; echo; echo '=== Done. Press Enter to close. ==='; read"
         Quickshell.execDetached(buildTerminalCommand(cmd))
     }
 

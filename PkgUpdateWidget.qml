@@ -9,17 +9,19 @@ PluginComponent {
     id: root
 
     // ── State ────────────────────────────────────────────────────────────────
-    property var dnfUpdates: []
+    property var packageUpdates: []
     property var flatpakUpdates: []
-    property bool dnfChecking: true
+    property bool packageChecking: true
     property bool flatpakChecking: true
+    property string effectiveBackend: "none"
 
     // ── Settings (from plugin data) ───────────────────────────────────────────
     property string terminalApp: pluginData.terminalApp || "alacritty"
     property int refreshMins: pluginData.refreshMins || 60
+    property string backendMode: pluginData.backendMode || "auto"
     property bool showFlatpak: pluginData.showFlatpak !== undefined ? pluginData.showFlatpak : true
 
-    property int totalUpdates: dnfUpdates.length + (showFlatpak ? flatpakUpdates.length : 0)
+    property int totalUpdates: packageUpdates.length + (showFlatpak ? flatpakUpdates.length : 0)
 
     popoutWidth: 480
 
@@ -33,22 +35,28 @@ PluginComponent {
     }
 
     // ── Update check functions ────────────────────────────────────────────────
-    function checkUpdates() {
-        root.dnfChecking = true
-        Proc.runCommand("pkgUpdate.dnf", ["sh", "-c", "dnf list --upgrades --color=never 2>/dev/null"], (stdout, exitCode) => {
-            root.dnfUpdates = parseDnfPackages(stdout)
-            root.dnfChecking = false
-        }, 100)
+    function normalizeBackendMode(mode) {
+        if (mode === "apt" || mode === "dnf" || mode === "auto")
+            return mode
+        return "auto"
+    }
 
-        if (root.showFlatpak) {
-            root.flatpakChecking = true
-            Proc.runCommand("pkgUpdate.flatpak", ["sh", "-c", "flatpak remote-ls --updates 2>/dev/null"], (stdout, exitCode) => {
-                root.flatpakUpdates = parseFlatpakApps(stdout)
-                root.flatpakChecking = false
-            }, 100)
-        } else {
-            root.flatpakChecking = false
-        }
+    function parseAptPackages(stdout) {
+        if (!stdout || stdout.trim().length === 0)
+            return []
+        return stdout.trim().split('\n').filter(line => {
+            const t = line.trim()
+            return t.length > 0 && !t.startsWith("Listing...")
+        }).map(line => {
+            const parts = line.trim().split(/\s+/)
+            const packagePart = parts[0] || ""
+            const slashIndex = packagePart.indexOf("/")
+            return {
+                name: slashIndex > -1 ? packagePart.slice(0, slashIndex) : packagePart,
+                version: parts[1] || "",
+                repo: parts[2] || ""
+            }
+        }).filter(p => p.name.length > 0)
     }
 
     function parseDnfPackages(stdout) {
@@ -64,7 +72,75 @@ PluginComponent {
                 version: parts[1] || '',
                 repo: parts[2] || ''
             }
-        }).filter(p => p.name.length > 0 && p.name.indexOf('.') > -1)
+        }).filter(p => p.name.length > 0)
+    }
+
+    function parsePackageResult(stdout, mode) {
+        let backend = mode
+        let output = stdout || ""
+
+        if (mode === "auto") {
+            backend = "none"
+            const lines = output.split('\n')
+            for (let i = 0; i < lines.length; i++) {
+                const line = lines[i].trim()
+                if (line.startsWith("__PKG_BACKEND__:")) {
+                    backend = line.slice("__PKG_BACKEND__:".length)
+                    lines.splice(i, 1)
+                    output = lines.join('\n')
+                    break
+                }
+            }
+        }
+
+        if (backend === "apt")
+            return {
+                backend,
+                updates: parseAptPackages(output)
+            }
+        if (backend === "dnf")
+            return {
+                backend,
+                updates: parseDnfPackages(output)
+            }
+
+        return {
+            backend: "none",
+            updates: []
+        }
+    }
+
+    function checkUpdates() {
+        root.packageChecking = true
+        const mode = normalizeBackendMode(root.backendMode)
+        let checkCmd = ""
+
+        if (mode === "apt") {
+            root.effectiveBackend = "apt"
+            checkCmd = "apt update >/dev/null 2>&1; LC_ALL=C apt list --upgradable 2>/dev/null"
+        } else if (mode === "dnf") {
+            root.effectiveBackend = "dnf"
+            checkCmd = "dnf list --upgrades --color=never 2>/dev/null"
+        } else {
+            checkCmd = "if command -v apt >/dev/null 2>&1; then echo __PKG_BACKEND__:apt; apt update >/dev/null 2>&1; LC_ALL=C apt list --upgradable 2>/dev/null; elif command -v dnf >/dev/null 2>&1; then echo __PKG_BACKEND__:dnf; dnf list --upgrades --color=never 2>/dev/null; else echo __PKG_BACKEND__:none; fi"
+        }
+
+        Proc.runCommand("pkgUpdate.system", ["sh", "-c", checkCmd], (stdout, exitCode) => {
+            const result = parsePackageResult(stdout, mode)
+            root.effectiveBackend = result.backend
+            root.packageUpdates = result.updates
+            root.packageChecking = false
+        }, 100)
+
+        if (root.showFlatpak) {
+            root.flatpakChecking = true
+            Proc.runCommand("pkgUpdate.flatpak", ["sh", "-c", "flatpak remote-ls --updates 2>/dev/null"], (stdout, exitCode) => {
+                root.flatpakUpdates = parseFlatpakApps(stdout)
+                root.flatpakChecking = false
+            }, 100)
+        } else {
+            root.flatpakChecking = false
+        }
     }
 
     function parseFlatpakApps(stdout) {
@@ -81,9 +157,13 @@ PluginComponent {
     }
 
     // ── Terminal launch ───────────────────────────────────────────────────────
-    function runDnfUpdate() {
+    function runPackageUpdate() {
         root.closePopout()
-        const cmd = "sudo dnf upgrade -y; echo; echo '=== Done. Press Enter to close. ==='; read"
+        const mode = normalizeBackendMode(root.backendMode)
+        const backend = mode === "auto" ? root.effectiveBackend : mode
+        const cmd = backend === "dnf"
+            ? "sudo dnf upgrade -y; echo; echo '=== Done. Press Enter to close. ==='; read"
+            : "sudo apt update && sudo apt upgrade -y; echo; echo '=== Done. Press Enter to close. ==='; read"
         Quickshell.execDetached(["sh", "-c", root.terminalApp + " -e sh -c '" + cmd + "'"])
     }
 
@@ -107,7 +187,7 @@ PluginComponent {
 
             StyledText {
                 anchors.verticalCenter: parent.verticalCenter
-                text: (root.dnfChecking || (root.showFlatpak && root.flatpakChecking)) ? "…" : root.totalUpdates.toString()
+                text: (root.packageChecking || (root.showFlatpak && root.flatpakChecking)) ? "…" : root.totalUpdates.toString()
                 color: root.totalUpdates > 0 ? Theme.primary : Theme.secondary
                 font.pixelSize: Theme.fontSizeMedium
             }
@@ -128,7 +208,7 @@ PluginComponent {
 
             StyledText {
                 anchors.horizontalCenter: parent.horizontalCenter
-                text: (root.dnfChecking || (root.showFlatpak && root.flatpakChecking)) ? "…" : root.totalUpdates.toString()
+                text: (root.packageChecking || (root.showFlatpak && root.flatpakChecking)) ? "…" : root.totalUpdates.toString()
                 color: root.totalUpdates > 0 ? Theme.primary : Theme.secondary
                 font.pixelSize: Theme.fontSizeSmall
             }
@@ -245,7 +325,7 @@ PluginComponent {
                 }
             }
 
-            // ── DNF section header ───────────────────────────────────────────
+            // ── System packages section header ───────────────────────────────
             Item {
                 width: parent.width
                 height: 36
@@ -271,7 +351,7 @@ PluginComponent {
                     }
 
                     StyledText {
-                        text: "DNF"
+                        text: "System Packages"
                         font.pixelSize: Theme.fontSizeMedium
                         font.weight: Font.Bold
                         color: Theme.surfaceText
@@ -279,15 +359,15 @@ PluginComponent {
                     }
 
                     Rectangle {
-                        width: dnfCountLabel.width + 14
+                        width: packageCountLabel.width + 14
                         height: 20
                         radius: 10
                         color: Qt.rgba(Theme.primary.r, Theme.primary.g, Theme.primary.b, 0.15)
                         anchors.verticalCenter: parent.verticalCenter
 
                         StyledText {
-                            id: dnfCountLabel
-                            text: root.dnfChecking ? "…" : root.dnfUpdates.length.toString()
+                            id: packageCountLabel
+                            text: root.packageChecking ? "…" : root.packageUpdates.length.toString()
                             font.pixelSize: Theme.fontSizeSmall
                             font.weight: Font.Bold
                             color: Theme.primary
@@ -296,18 +376,18 @@ PluginComponent {
                     }
                 }
 
-                // Update DNF button
+                // Update packages button
                 Item {
                     anchors.right: parent.right
                     anchors.verticalCenter: parent.verticalCenter
-                    width: dnfBtnRow.width + Theme.spacingM * 2
+                    width: packageBtnRow.width + Theme.spacingM * 2
                     height: 30
-                    visible: !root.dnfChecking && root.dnfUpdates.length > 0
+                    visible: !root.packageChecking && root.packageUpdates.length > 0
 
                     Rectangle {
                         anchors.fill: parent
                         radius: Theme.cornerRadius
-                        color: dnfBtnArea.containsMouse ? Theme.primary : Qt.rgba(Theme.primary.r, Theme.primary.g, Theme.primary.b, 0.15)
+                        color: packageBtnArea.containsMouse ? Theme.primary : Qt.rgba(Theme.primary.r, Theme.primary.g, Theme.primary.b, 0.15)
                         border.width: 1
                         border.color: Qt.rgba(Theme.primary.r, Theme.primary.g, Theme.primary.b, 0.4)
                         Behavior on color {
@@ -318,40 +398,40 @@ PluginComponent {
                     }
 
                     Row {
-                        id: dnfBtnRow
+                        id: packageBtnRow
                         anchors.centerIn: parent
                         spacing: Theme.spacingXS
 
                         DankIcon {
                             name: "download"
                             size: 14
-                            color: dnfBtnArea.containsMouse ? "white" : Theme.primary
+                            color: packageBtnArea.containsMouse ? "white" : Theme.primary
                             anchors.verticalCenter: parent.verticalCenter
                         }
 
                         StyledText {
-                            text: "Update DNF"
+                            text: "Update Packages"
                             font.pixelSize: Theme.fontSizeSmall
                             font.weight: Font.Medium
-                            color: dnfBtnArea.containsMouse ? "white" : Theme.primary
+                            color: packageBtnArea.containsMouse ? "white" : Theme.primary
                             anchors.verticalCenter: parent.verticalCenter
                         }
                     }
 
                     MouseArea {
-                        id: dnfBtnArea
+                        id: packageBtnArea
                         anchors.fill: parent
                         hoverEnabled: true
                         cursorShape: Qt.PointingHandCursor
-                        onClicked: root.runDnfUpdate()
+                        onClicked: root.runPackageUpdate()
                     }
                 }
             }
 
-            // ── DNF update list ──────────────────────────────────────────────
+            // ── System package update list ───────────────────────────────────
             StyledRect {
                 width: parent.width
-                height: root.dnfChecking ? 52 : (root.dnfUpdates.length === 0 ? 46 : Math.min(root.dnfUpdates.length * 38 + 8, 180))
+                height: root.packageChecking ? 52 : (root.packageUpdates.length === 0 ? 46 : Math.min(root.packageUpdates.length * 38 + 8, 180))
                 radius: Theme.cornerRadius * 1.5
                 color: Qt.rgba(Theme.surfaceContainer.r, Theme.surfaceContainer.g, Theme.surfaceContainer.b, 0.5)
                 border.width: 1
@@ -368,7 +448,7 @@ PluginComponent {
                 Row {
                     anchors.centerIn: parent
                     spacing: Theme.spacingS
-                    visible: root.dnfChecking
+                    visible: root.packageChecking
 
                     DankIcon {
                         name: "sync"
@@ -388,7 +468,7 @@ PluginComponent {
                 Row {
                     anchors.centerIn: parent
                     spacing: Theme.spacingS
-                    visible: !root.dnfChecking && root.dnfUpdates.length === 0
+                    visible: !root.packageChecking && root.packageUpdates.length === 0
 
                     DankIcon {
                         name: "check_circle"
@@ -409,9 +489,9 @@ PluginComponent {
                     anchors.fill: parent
                     anchors.margins: 4
                     clip: true
-                    model: root.dnfUpdates
+                    model: root.packageUpdates
                     spacing: 2
-                    visible: !root.dnfChecking && root.dnfUpdates.length > 0
+                    visible: !root.packageChecking && root.packageUpdates.length > 0
 
                     delegate: Item {
                         width: ListView.view.width

@@ -11,10 +11,13 @@ PluginComponent {
     // ── State ────────────────────────────────────────────────────────────────
     property var packageUpdates: []
     property var flatpakUpdates: []
+    property var snapUpdates: []
     property bool packageChecking: true
     property bool flatpakChecking: true
+    property bool snapChecking: true
     property string packageError: ""
     property string flatpakError: ""
+    property string snapError: ""
     property string effectiveBackend: "none"
 
     // ── Settings (from plugin data) ───────────────────────────────────────────
@@ -22,8 +25,9 @@ PluginComponent {
     property int refreshMins: normalizeRefreshMins(pluginData.refreshMins)
     property string backendMode: normalizeBackendMode(pluginData.backendMode)
     property bool showFlatpak: pluginData.showFlatpak !== undefined ? pluginData.showFlatpak : true
+    property bool showSnap: pluginData.showSnap !== undefined ? pluginData.showSnap : true
 
-    property int totalUpdates: packageUpdates.length + (showFlatpak ? flatpakUpdates.length : 0)
+    property int totalUpdates: packageUpdates.length + (showFlatpak ? flatpakUpdates.length : 0) + (showSnap ? snapUpdates.length : 0)
 
     popoutWidth: 480
 
@@ -177,6 +181,27 @@ PluginComponent {
         }
     }
 
+    function parseSnapMarker(stdout) {
+        const errorPrefix = "__SNAP_ERROR__:"
+        const lines = (stdout || "").split('\n')
+        let errorCode = ""
+        const cleaned = []
+
+        for (let i = 0; i < lines.length; i++) {
+            const line = lines[i].trim()
+            if (line.startsWith(errorPrefix)) {
+                errorCode = line.slice(errorPrefix.length).trim()
+                continue
+            }
+            cleaned.push(lines[i])
+        }
+
+        return {
+            errorCode,
+            output: cleaned.join('\n')
+        }
+    }
+
     function humanizePackageError(code, backend) {
         if (code === "apt_missing")
             return "APT is not installed on this system"
@@ -197,6 +222,14 @@ PluginComponent {
         if (code === "flatpak_check_failed")
             return "Flatpak update check failed"
         return "Failed to check Flatpak updates"
+    }
+
+    function humanizeSnapError(code) {
+        if (code === "snap_missing")
+            return "Snap is not installed on this system"
+        if (code === "snap_check_failed")
+            return "Snap update check failed"
+        return "Failed to check Snap updates"
     }
 
     function parseAptPackages(stdout) {
@@ -276,6 +309,14 @@ PluginComponent {
         }
     }
 
+    function parseSnapResult(stdout) {
+        const marker = parseSnapMarker(stdout)
+        return {
+            errorCode: marker.errorCode,
+            updates: parseSnapApps(marker.output)
+        }
+    }
+
     function checkUpdates() {
         root.packageChecking = true
         root.packageError = ""
@@ -329,6 +370,28 @@ PluginComponent {
             root.flatpakChecking = false
             root.flatpakError = ""
         }
+
+        if (root.showSnap) {
+            root.snapChecking = true
+            root.snapError = ""
+            Proc.runCommand("pkgUpdate.snap", ["sh", "-c", "if ! command -v snap >/dev/null 2>&1; then echo __SNAP_ERROR__:snap_missing; exit 127; fi; LC_ALL=C snap refresh --list 2>/dev/null || { echo __SNAP_ERROR__:snap_check_failed; exit 23; }"], (stdout, exitCode) => {
+                const result = parseSnapResult(stdout)
+                if (result.errorCode.length > 0) {
+                    root.snapUpdates = []
+                    root.snapError = humanizeSnapError(result.errorCode)
+                } else if (exitCode !== 0) {
+                    root.snapUpdates = []
+                    root.snapError = humanizeSnapError("")
+                } else {
+                    root.snapUpdates = result.updates
+                    root.snapError = ""
+                }
+                root.snapChecking = false
+            }, 100)
+        } else {
+            root.snapChecking = false
+            root.snapError = ""
+        }
     }
 
     function parseFlatpakApps(stdout) {
@@ -345,6 +408,22 @@ PluginComponent {
                 origin: parts[2] || ''
             }
         }).filter(a => a.name.length > 0)
+    }
+
+    function parseSnapApps(stdout) {
+        if (!stdout || stdout.trim().length === 0)
+            return []
+        return stdout.trim().split('\n').filter(line => {
+            const t = line.trim()
+            return t.length > 0 && !t.startsWith("Name") && !t.startsWith("All snaps")
+        }).map(line => {
+            const parts = line.trim().split(/\s+/)
+            return {
+                name: parts[0] || "",
+                version: parts[1] || "",
+                channel: parts[3] || ""
+            }
+        }).filter(app => app.name.length > 0)
     }
 
     // ── Terminal launch ───────────────────────────────────────────────────────
@@ -364,6 +443,12 @@ PluginComponent {
         Quickshell.execDetached(buildTerminalCommand(cmd))
     }
 
+    function runSnapUpdate() {
+        root.closePopout()
+        const cmd = "sudo snap refresh; echo; echo '=== Done. Press Enter to close. ==='; read"
+        Quickshell.execDetached(buildTerminalCommand(cmd))
+    }
+
     // ── Bar pills ─────────────────────────────────────────────────────────────
     horizontalBarPill: Component {
         Row {
@@ -378,7 +463,7 @@ PluginComponent {
 
             StyledText {
                 anchors.verticalCenter: parent.verticalCenter
-                text: (root.packageChecking || (root.showFlatpak && root.flatpakChecking)) ? "…" : root.totalUpdates.toString()
+                text: (root.packageChecking || (root.showFlatpak && root.flatpakChecking) || (root.showSnap && root.snapChecking)) ? "…" : root.totalUpdates.toString()
                 color: root.totalUpdates > 0 ? Theme.primary : Theme.secondary
                 font.pixelSize: Theme.fontSizeMedium
             }
@@ -399,7 +484,7 @@ PluginComponent {
 
             StyledText {
                 anchors.horizontalCenter: parent.horizontalCenter
-                text: (root.packageChecking || (root.showFlatpak && root.flatpakChecking)) ? "…" : root.totalUpdates.toString()
+                text: (root.packageChecking || (root.showFlatpak && root.flatpakChecking) || (root.showSnap && root.snapChecking)) ? "…" : root.totalUpdates.toString()
                 color: root.totalUpdates > 0 ? Theme.primary : Theme.secondary
                 font.pixelSize: Theme.fontSizeSmall
             }
@@ -971,6 +1056,239 @@ PluginComponent {
                             StyledText {
                                 id: appOriginText
                                 text: appOrigin
+                                font.pixelSize: Theme.fontSizeSmall - 1
+                                color: Theme.surfaceVariantText
+                                anchors.verticalCenter: parent.verticalCenter
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ── Snap section header ───────────────────────────────────────────
+            Item {
+                width: parent.width
+                height: 36
+                visible: root.showSnap
+
+                Row {
+                    anchors.left: parent.left
+                    anchors.verticalCenter: parent.verticalCenter
+                    spacing: Theme.spacingS
+
+                    Rectangle {
+                        width: 4
+                        height: 22
+                        radius: 2
+                        color: Theme.primary
+                        anchors.verticalCenter: parent.verticalCenter
+                    }
+
+                    DankIcon {
+                        name: "extension"
+                        size: 20
+                        color: Theme.primary
+                        anchors.verticalCenter: parent.verticalCenter
+                    }
+
+                    StyledText {
+                        text: "Snap"
+                        font.pixelSize: Theme.fontSizeMedium
+                        font.weight: Font.Bold
+                        color: Theme.surfaceText
+                        anchors.verticalCenter: parent.verticalCenter
+                    }
+
+                    Rectangle {
+                        width: snapCountLabel.width + 14
+                        height: 20
+                        radius: 10
+                        color: Qt.rgba(Theme.primary.r, Theme.primary.g, Theme.primary.b, 0.15)
+                        anchors.verticalCenter: parent.verticalCenter
+
+                        StyledText {
+                            id: snapCountLabel
+                            text: root.snapChecking ? "…" : root.snapUpdates.length.toString()
+                            font.pixelSize: Theme.fontSizeSmall
+                            font.weight: Font.Bold
+                            color: Theme.primary
+                            anchors.centerIn: parent
+                        }
+                    }
+                }
+
+                // Update Snap button
+                Item {
+                    anchors.right: parent.right
+                    anchors.verticalCenter: parent.verticalCenter
+                    width: snapBtnRow.width + Theme.spacingM * 2
+                    height: 30
+                    visible: !root.snapChecking && root.snapUpdates.length > 0
+
+                    Rectangle {
+                        anchors.fill: parent
+                        radius: Theme.cornerRadius
+                        color: snapBtnArea.containsMouse ? Theme.primary : Qt.rgba(Theme.primary.r, Theme.primary.g, Theme.primary.b, 0.15)
+                        border.width: 1
+                        border.color: Qt.rgba(Theme.primary.r, Theme.primary.g, Theme.primary.b, 0.4)
+                        Behavior on color {
+                            ColorAnimation {
+                                duration: 150
+                            }
+                        }
+                    }
+
+                    Row {
+                        id: snapBtnRow
+                        anchors.centerIn: parent
+                        spacing: Theme.spacingXS
+
+                        DankIcon {
+                            name: "download"
+                            size: 14
+                            color: snapBtnArea.containsMouse ? "white" : Theme.primary
+                            anchors.verticalCenter: parent.verticalCenter
+                        }
+
+                        StyledText {
+                            text: "Update Snap"
+                            font.pixelSize: Theme.fontSizeSmall
+                            font.weight: Font.Medium
+                            color: snapBtnArea.containsMouse ? "white" : Theme.primary
+                            anchors.verticalCenter: parent.verticalCenter
+                        }
+                    }
+
+                    MouseArea {
+                        id: snapBtnArea
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: root.runSnapUpdate()
+                    }
+                }
+            }
+
+            // ── Snap update list ─────────────────────────────────────────────
+            StyledRect {
+                width: parent.width
+                height: root.snapChecking ? 52 : (root.snapUpdates.length === 0 ? 46 : Math.min(root.snapUpdates.length * 38 + 8, 180))
+                radius: Theme.cornerRadius * 1.5
+                color: Qt.rgba(Theme.surfaceContainer.r, Theme.surfaceContainer.g, Theme.surfaceContainer.b, 0.5)
+                border.width: 1
+                border.color: Qt.rgba(Theme.primary.r, Theme.primary.g, Theme.primary.b, 0.1)
+                clip: true
+                visible: root.showSnap
+
+                Behavior on height {
+                    NumberAnimation {
+                        duration: 200
+                        easing.type: Easing.OutCubic
+                    }
+                }
+
+                Row {
+                    anchors.centerIn: parent
+                    spacing: Theme.spacingS
+                    visible: root.snapChecking
+
+                    DankIcon {
+                        name: "sync"
+                        size: 16
+                        color: Theme.primary
+                        anchors.verticalCenter: parent.verticalCenter
+                    }
+
+                    StyledText {
+                        text: "Checking for updates…"
+                        color: Theme.surfaceVariantText
+                        font.pixelSize: Theme.fontSizeSmall
+                        anchors.verticalCenter: parent.verticalCenter
+                    }
+                }
+
+                Row {
+                    anchors.centerIn: parent
+                    spacing: Theme.spacingS
+                    visible: !root.snapChecking && root.snapError.length > 0
+
+                    DankIcon {
+                        name: "error"
+                        size: 16
+                        color: Theme.error
+                        anchors.verticalCenter: parent.verticalCenter
+                    }
+
+                    StyledText {
+                        text: root.snapError
+                        color: Theme.error
+                        font.pixelSize: Theme.fontSizeSmall
+                        anchors.verticalCenter: parent.verticalCenter
+                    }
+                }
+
+                Row {
+                    anchors.centerIn: parent
+                    spacing: Theme.spacingS
+                    visible: !root.snapChecking && root.snapError.length === 0 && root.snapUpdates.length === 0
+
+                    DankIcon {
+                        name: "check_circle"
+                        size: 16
+                        color: Theme.secondary
+                        anchors.verticalCenter: parent.verticalCenter
+                    }
+
+                    StyledText {
+                        text: "No updates available"
+                        color: Theme.surfaceVariantText
+                        font.pixelSize: Theme.fontSizeSmall
+                        anchors.verticalCenter: parent.verticalCenter
+                    }
+                }
+
+                ListView {
+                    anchors.fill: parent
+                    anchors.margins: 4
+                    clip: true
+                    model: root.snapUpdates
+                    spacing: 2
+                    visible: !root.snapChecking && root.snapError.length === 0 && root.snapUpdates.length > 0
+
+                    delegate: Item {
+                        width: ListView.view.width
+                        height: 36
+
+                        property string snapName: modelData.name
+                        property string snapVersion: modelData.version
+
+                        Row {
+                            anchors.left: parent.left
+                            anchors.leftMargin: Theme.spacingM
+                            anchors.right: parent.right
+                            anchors.rightMargin: Theme.spacingM
+                            anchors.verticalCenter: parent.verticalCenter
+                            spacing: Theme.spacingS
+
+                            DankIcon {
+                                name: "extension"
+                                size: 14
+                                color: Theme.primary
+                                anchors.verticalCenter: parent.verticalCenter
+                            }
+
+                            StyledText {
+                                text: snapName
+                                font.pixelSize: Theme.fontSizeSmall
+                                color: Theme.surfaceText
+                                anchors.verticalCenter: parent.verticalCenter
+                                elide: Text.ElideRight
+                                width: parent.width - snapVersionText.implicitWidth - 14 - Theme.spacingS * 2
+                            }
+
+                            StyledText {
+                                id: snapVersionText
+                                text: snapVersion
                                 font.pixelSize: Theme.fontSizeSmall - 1
                                 color: Theme.surfaceVariantText
                                 anchors.verticalCenter: parent.verticalCenter

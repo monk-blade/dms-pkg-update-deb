@@ -19,6 +19,7 @@ A [DankMaterialShell](https://github.com/AvengeMedia/DankMaterialShell) widget t
 - Configurable terminal application
 - Configurable package backend mode (`auto`, `apt`, `dnf`)
 - Shows actionable check errors (missing backend, apt refresh failure, Flatpak/Snap issues)
+- APT metadata refresh for checks uses `aptdcon --refresh` (no `sudo` required)
 
 ## Installation
 
@@ -52,6 +53,7 @@ Then enable the widget in the DMS Plugins tab and add it to DankBar.
 - One system package manager:
 	- `apt` (Ubuntu/Debian-based systems)
 	- `dnf` (Fedora/RHEL-based systems)
+- `aptdcon` (required when using `apt` backend for update checks)
 - `flatpak` (optional, can be disabled in settings)
 - `snap` (optional, can be disabled in settings)
 - A terminal emulator that accepts `-e` to run a command

@@ -205,6 +205,8 @@ PluginComponent {
     function humanizePackageError(code, backend) {
         if (code === "apt_missing")
             return "APT is not installed on this system"
+        if (code === "aptdcon_missing")
+            return "aptdcon is not installed (required for APT metadata refresh without sudo)"
         if (code === "apt_update_failed")
             return "APT metadata refresh failed (check network, lock, or permissions)"
         if (code === "dnf_missing")
@@ -325,12 +327,12 @@ PluginComponent {
 
         if (mode === "apt") {
             root.effectiveBackend = "apt"
-            checkCmd = "if ! command -v apt >/dev/null 2>&1; then echo __PKG_ERROR__:apt_missing; exit 127; fi; if ! apt update >/dev/null 2>&1; then echo __PKG_ERROR__:apt_update_failed; exit 20; fi; LC_ALL=C apt list --upgradable 2>/dev/null"
+            checkCmd = "if ! command -v apt >/dev/null 2>&1; then echo __PKG_ERROR__:apt_missing; exit 127; fi; if ! command -v aptdcon >/dev/null 2>&1; then echo __PKG_ERROR__:aptdcon_missing; exit 127; fi; if ! aptdcon --refresh >/dev/null 2>&1; then echo __PKG_ERROR__:apt_update_failed; exit 20; fi; LC_ALL=C apt list --upgradable 2>/dev/null"
         } else if (mode === "dnf") {
             root.effectiveBackend = "dnf"
             checkCmd = "if ! command -v dnf >/dev/null 2>&1; then echo __PKG_ERROR__:dnf_missing; exit 127; fi; LC_ALL=C dnf list --upgrades --color=never 2>/dev/null || { echo __PKG_ERROR__:dnf_check_failed; exit 21; }"
         } else {
-            checkCmd = "if command -v apt >/dev/null 2>&1; then echo __PKG_BACKEND__:apt; if ! apt update >/dev/null 2>&1; then echo __PKG_ERROR__:apt_update_failed; exit 20; fi; LC_ALL=C apt list --upgradable 2>/dev/null; elif command -v dnf >/dev/null 2>&1; then echo __PKG_BACKEND__:dnf; LC_ALL=C dnf list --upgrades --color=never 2>/dev/null || { echo __PKG_ERROR__:dnf_check_failed; exit 21; }; else echo __PKG_BACKEND__:none; echo __PKG_ERROR__:no_backend; exit 127; fi"
+            checkCmd = "if command -v apt >/dev/null 2>&1; then echo __PKG_BACKEND__:apt; if ! command -v aptdcon >/dev/null 2>&1; then echo __PKG_ERROR__:aptdcon_missing; exit 127; fi; if ! aptdcon --refresh >/dev/null 2>&1; then echo __PKG_ERROR__:apt_update_failed; exit 20; fi; LC_ALL=C apt list --upgradable 2>/dev/null; elif command -v dnf >/dev/null 2>&1; then echo __PKG_BACKEND__:dnf; LC_ALL=C dnf list --upgrades --color=never 2>/dev/null || { echo __PKG_ERROR__:dnf_check_failed; exit 21; }; else echo __PKG_BACKEND__:none; echo __PKG_ERROR__:no_backend; exit 127; fi"
         }
 
         Proc.runCommand("pkgUpdate.system", ["sh", "-c", checkCmd], (stdout, exitCode) => {

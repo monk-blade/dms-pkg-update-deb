@@ -16,6 +16,7 @@ A [DankMaterialShell](https://github.com/AvengeMedia/DankMaterialShell) widget t
 - Configurable refresh interval
 - Configurable terminal application
 - Configurable package backend mode (`auto`, `apt`, `dnf`)
+- Shows actionable check errors (missing backend, apt refresh failure, Flatpak issues)
 
 ## Installation
 
@@ -38,9 +39,9 @@ Then enable the widget in the DMS Plugins tab and add it to DankBar.
 
 | Setting | Default | Description |
 |---|---|---|
-| Terminal Application | `alacritty` | Terminal used to run updates (`kitty`, `foot`, `ghostty`, etc.) |
+| Terminal Application | `alacritty` | Terminal command used to run updates (supports args like `kitty --single-instance`; unsafe shell tokens fallback to `alacritty`) |
 | Refresh Interval | `60` min | How often to check for updates (5–240 min) |
-| Package Backend | `auto` | System package backend: `auto` (prefer APT, fallback DNF), `apt`, or `dnf` |
+| Package Backend | `auto` | System package backend: `auto` (prefer APT, fallback DNF), `apt`, or `dnf` (invalid values fallback to `auto`) |
 | Show Flatpak Updates | `true` | Toggle Flatpak section on/off |
 
 ## Requirements

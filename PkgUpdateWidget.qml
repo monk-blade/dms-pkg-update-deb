@@ -13,12 +13,14 @@ PluginComponent {
     property var flatpakUpdates: []
     property bool packageChecking: true
     property bool flatpakChecking: true
+    property string packageError: ""
+    property string flatpakError: ""
     property string effectiveBackend: "none"
 
     // ── Settings (from plugin data) ───────────────────────────────────────────
-    property string terminalApp: pluginData.terminalApp || "alacritty"
-    property int refreshMins: pluginData.refreshMins || 60
-    property string backendMode: pluginData.backendMode || "auto"
+    property string terminalApp: normalizeTerminalApp(pluginData.terminalApp)
+    property int refreshMins: normalizeRefreshMins(pluginData.refreshMins)
+    property string backendMode: normalizeBackendMode(pluginData.backendMode)
     property bool showFlatpak: pluginData.showFlatpak !== undefined ? pluginData.showFlatpak : true
 
     property int totalUpdates: packageUpdates.length + (showFlatpak ? flatpakUpdates.length : 0)
@@ -35,10 +37,166 @@ PluginComponent {
     }
 
     // ── Update check functions ────────────────────────────────────────────────
+    function normalizeTerminalApp(command) {
+        if (!command)
+            return "alacritty"
+        const trimmed = String(command).trim()
+        return trimmed.length > 0 ? trimmed : "alacritty"
+    }
+
+    function splitCommandLine(command) {
+        const input = String(command || "").trim()
+        if (input.length === 0)
+            return []
+
+        const parts = []
+        let current = ""
+        let quote = ""
+
+        for (let i = 0; i < input.length; i++) {
+            const ch = input[i]
+
+            if (quote.length > 0) {
+                if (ch === quote) {
+                    quote = ""
+                } else if (ch === "\\" && i + 1 < input.length) {
+                    i += 1
+                    current += input[i]
+                } else {
+                    current += ch
+                }
+                continue
+            }
+
+            if (ch === '"' || ch === "'") {
+                quote = ch
+                continue
+            }
+
+            if (/\s/.test(ch)) {
+                if (current.length > 0) {
+                    parts.push(current)
+                    current = ""
+                }
+                continue
+            }
+
+            if (ch === "\\" && i + 1 < input.length) {
+                i += 1
+                current += input[i]
+                continue
+            }
+
+            current += ch
+        }
+
+        if (quote.length > 0)
+            return []
+        if (current.length > 0)
+            parts.push(current)
+        return parts
+    }
+
+    function hasUnsafeToken(token) {
+        return /[;&|`$<>\n\r]/.test(token || "")
+    }
+
+    function buildTerminalCommand(updateCmd) {
+        const parsed = splitCommandLine(root.terminalApp)
+        const fallback = ["alacritty"]
+        const terminalParts = parsed.length > 0 ? parsed : fallback
+
+        for (let i = 0; i < terminalParts.length; i++) {
+            if (hasUnsafeToken(terminalParts[i]))
+                return fallback.concat(["-e", "sh", "-lc", updateCmd])
+        }
+
+        return terminalParts.concat(["-e", "sh", "-lc", updateCmd])
+    }
+
+    function normalizeRefreshMins(value) {
+        const parsed = Number(value)
+        if (!Number.isFinite(parsed))
+            return 60
+        return Math.max(5, Math.min(240, Math.floor(parsed)))
+    }
+
     function normalizeBackendMode(mode) {
-        if (mode === "apt" || mode === "dnf" || mode === "auto")
-            return mode
+        const value = String(mode || "").trim().toLowerCase()
+        if (value === "apt" || value === "dnf" || value === "auto")
+            return value
         return "auto"
+    }
+
+    function parseBackendMarker(stdout) {
+        const markerPrefix = "__PKG_BACKEND__:"
+        const errorPrefix = "__PKG_ERROR__:"
+        const lines = (stdout || "").split('\n')
+        let backend = "none"
+        let errorCode = ""
+        const cleaned = []
+
+        for (let i = 0; i < lines.length; i++) {
+            const line = lines[i].trim()
+            if (line.startsWith(markerPrefix)) {
+                backend = line.slice(markerPrefix.length).trim()
+                continue
+            }
+            if (line.startsWith(errorPrefix)) {
+                errorCode = line.slice(errorPrefix.length).trim()
+                continue
+            }
+            cleaned.push(lines[i])
+        }
+
+        return {
+            backend,
+            errorCode,
+            output: cleaned.join('\n')
+        }
+    }
+
+    function parseFlatpakMarker(stdout) {
+        const errorPrefix = "__FLATPAK_ERROR__:"
+        const lines = (stdout || "").split('\n')
+        let errorCode = ""
+        const cleaned = []
+
+        for (let i = 0; i < lines.length; i++) {
+            const line = lines[i].trim()
+            if (line.startsWith(errorPrefix)) {
+                errorCode = line.slice(errorPrefix.length).trim()
+                continue
+            }
+            cleaned.push(lines[i])
+        }
+
+        return {
+            errorCode,
+            output: cleaned.join('\n')
+        }
+    }
+
+    function humanizePackageError(code, backend) {
+        if (code === "apt_missing")
+            return "APT is not installed on this system"
+        if (code === "apt_update_failed")
+            return "APT metadata refresh failed (check network, lock, or permissions)"
+        if (code === "dnf_missing")
+            return "DNF is not installed on this system"
+        if (code === "dnf_check_failed")
+            return "DNF update check failed"
+        if (code === "no_backend")
+            return "No supported package manager found (apt/dnf)"
+        return backend === "dnf" ? "Failed to check DNF updates" : "Failed to check APT updates"
+    }
+
+    function humanizeFlatpakError(code) {
+        if (code === "flatpak_missing")
+            return "Flatpak is not installed on this system"
+        if (code === "flatpak_check_failed")
+            return "Flatpak update check failed"
+        return "Failed to check Flatpak updates"
     }
 
     function parseAptPackages(stdout) {
@@ -46,7 +204,7 @@ PluginComponent {
             return []
         return stdout.trim().split('\n').filter(line => {
             const t = line.trim()
-            return t.length > 0 && !t.startsWith("Listing...")
+            return t.length > 0 && !t.startsWith("Listing...") && t.indexOf("/") > -1
         }).map(line => {
             const parts = line.trim().split(/\s+/)
             const packagePart = parts[0] || ""
@@ -64,7 +222,7 @@ PluginComponent {
             return []
         return stdout.trim().split('\n').filter(line => {
             const t = line.trim()
-            return t.length > 0 && !t.startsWith('Last') && !t.startsWith('Upgradable') && !t.startsWith('Available') && !t.startsWith('Extra')
+            return t.length > 0 && !t.startsWith('Last') && !t.startsWith('Upgradable') && !t.startsWith('Available') && !t.startsWith('Extra') && !t.startsWith('Obsoleting')
         }).map(line => {
             const parts = line.trim().split(/\s+/)
             return {
@@ -72,81 +230,114 @@ PluginComponent {
                 version: parts[1] || '',
                 repo: parts[2] || ''
             }
-        }).filter(p => p.name.length > 0)
+        }).filter(p => p.name.length > 0 && p.name.indexOf('.') > -1)
     }
 
     function parsePackageResult(stdout, mode) {
         let backend = mode
+        let errorCode = ""
         let output = stdout || ""
 
+        const marker = parseBackendMarker(output)
+        output = marker.output
+        errorCode = marker.errorCode
+
         if (mode === "auto") {
-            backend = "none"
-            const lines = output.split('\n')
-            for (let i = 0; i < lines.length; i++) {
-                const line = lines[i].trim()
-                if (line.startsWith("__PKG_BACKEND__:")) {
-                    backend = line.slice("__PKG_BACKEND__:".length)
-                    lines.splice(i, 1)
-                    output = lines.join('\n')
-                    break
-                }
-            }
+            backend = marker.backend
+        } else if (marker.backend.length > 0 && marker.backend !== "none") {
+            backend = marker.backend
         }
 
         if (backend === "apt")
             return {
                 backend,
+                errorCode,
                 updates: parseAptPackages(output)
             }
         if (backend === "dnf")
             return {
                 backend,
+                errorCode,
                 updates: parseDnfPackages(output)
             }
 
         return {
             backend: "none",
+            errorCode: errorCode.length > 0 ? errorCode : "no_backend",
             updates: []
+        }
+    }
+
+    function parseFlatpakResult(stdout) {
+        const marker = parseFlatpakMarker(stdout)
+        return {
+            errorCode: marker.errorCode,
+            updates: parseFlatpakApps(marker.output)
         }
     }
 
     function checkUpdates() {
         root.packageChecking = true
+        root.packageError = ""
         const mode = normalizeBackendMode(root.backendMode)
         let checkCmd = ""
 
         if (mode === "apt") {
             root.effectiveBackend = "apt"
-            checkCmd = "apt update >/dev/null 2>&1; LC_ALL=C apt list --upgradable 2>/dev/null"
+            checkCmd = "if ! command -v apt >/dev/null 2>&1; then echo __PKG_ERROR__:apt_missing; exit 127; fi; if ! apt update >/dev/null 2>&1; then echo __PKG_ERROR__:apt_update_failed; exit 20; fi; LC_ALL=C apt list --upgradable 2>/dev/null"
         } else if (mode === "dnf") {
             root.effectiveBackend = "dnf"
-            checkCmd = "dnf list --upgrades --color=never 2>/dev/null"
+            checkCmd = "if ! command -v dnf >/dev/null 2>&1; then echo __PKG_ERROR__:dnf_missing; exit 127; fi; LC_ALL=C dnf list --upgrades --color=never 2>/dev/null || { echo __PKG_ERROR__:dnf_check_failed; exit 21; }"
         } else {
-            checkCmd = "if command -v apt >/dev/null 2>&1; then echo __PKG_BACKEND__:apt; apt update >/dev/null 2>&1; LC_ALL=C apt list --upgradable 2>/dev/null; elif command -v dnf >/dev/null 2>&1; then echo __PKG_BACKEND__:dnf; dnf list --upgrades --color=never 2>/dev/null; else echo __PKG_BACKEND__:none; fi"
+            checkCmd = "if command -v apt >/dev/null 2>&1; then echo __PKG_BACKEND__:apt; if ! apt update >/dev/null 2>&1; then echo __PKG_ERROR__:apt_update_failed; exit 20; fi; LC_ALL=C apt list --upgradable 2>/dev/null; elif command -v dnf >/dev/null 2>&1; then echo __PKG_BACKEND__:dnf; LC_ALL=C dnf list --upgrades --color=never 2>/dev/null || { echo __PKG_ERROR__:dnf_check_failed; exit 21; }; else echo __PKG_BACKEND__:none; echo __PKG_ERROR__:no_backend; exit 127; fi"
         }
 
         Proc.runCommand("pkgUpdate.system", ["sh", "-c", checkCmd], (stdout, exitCode) => {
             const result = parsePackageResult(stdout, mode)
             root.effectiveBackend = result.backend
-            root.packageUpdates = result.updates
+            if (result.errorCode.length > 0) {
+                root.packageUpdates = []
+                root.packageError = humanizePackageError(result.errorCode, result.backend)
+            } else if (exitCode !== 0) {
+                root.packageUpdates = []
+                root.packageError = humanizePackageError("", result.backend)
+            } else {
+                root.packageUpdates = result.updates
+                root.packageError = ""
+            }
             root.packageChecking = false
         }, 100)
 
         if (root.showFlatpak) {
             root.flatpakChecking = true
-            Proc.runCommand("pkgUpdate.flatpak", ["sh", "-c", "flatpak remote-ls --updates 2>/dev/null"], (stdout, exitCode) => {
-                root.flatpakUpdates = parseFlatpakApps(stdout)
+            root.flatpakError = ""
+            Proc.runCommand("pkgUpdate.flatpak", ["sh", "-c", "if ! command -v flatpak >/dev/null 2>&1; then echo __FLATPAK_ERROR__:flatpak_missing; exit 127; fi; flatpak remote-ls --updates 2>/dev/null || { echo __FLATPAK_ERROR__:flatpak_check_failed; exit 22; }"], (stdout, exitCode) => {
+                const result = parseFlatpakResult(stdout)
+                if (result.errorCode.length > 0) {
+                    root.flatpakUpdates = []
+                    root.flatpakError = humanizeFlatpakError(result.errorCode)
+                } else if (exitCode !== 0) {
+                    root.flatpakUpdates = []
+                    root.flatpakError = humanizeFlatpakError("")
+                } else {
+                    root.flatpakUpdates = result.updates
+                    root.flatpakError = ""
+                }
                 root.flatpakChecking = false
             }, 100)
         } else {
             root.flatpakChecking = false
+            root.flatpakError = ""
         }
     }
 
     function parseFlatpakApps(stdout) {
         if (!stdout || stdout.trim().length === 0)
             return []
-        return stdout.trim().split('\n').filter(line => line.trim().length > 0).map(line => {
+        return stdout.trim().split('\n').filter(line => {
+            const t = line.trim()
+            return t.length > 0 && !t.startsWith("Name") && !t.startsWith("Application")
+        }).map(line => {
             const parts = line.trim().split(/\t|\s{2,}/)
             return {
                 name: parts[0] || '',
@@ -164,13 +355,13 @@ PluginComponent {
         const cmd = backend === "dnf"
             ? "sudo dnf upgrade -y; echo; echo '=== Done. Press Enter to close. ==='; read"
             : "sudo apt update && sudo apt upgrade -y; echo; echo '=== Done. Press Enter to close. ==='; read"
-        Quickshell.execDetached(["sh", "-c", root.terminalApp + " -e sh -c '" + cmd + "'"])
+        Quickshell.execDetached(buildTerminalCommand(cmd))
     }
 
     function runFlatpakUpdate() {
         root.closePopout()
         const cmd = "flatpak update -y; echo; echo '=== Done. Press Enter to close. ==='; read"
-        Quickshell.execDetached(["sh", "-c", root.terminalApp + " -e sh -c '" + cmd + "'"])
+        Quickshell.execDetached(buildTerminalCommand(cmd))
     }
 
     // ── Bar pills ─────────────────────────────────────────────────────────────
@@ -468,7 +659,27 @@ PluginComponent {
                 Row {
                     anchors.centerIn: parent
                     spacing: Theme.spacingS
-                    visible: !root.packageChecking && root.packageUpdates.length === 0
+                    visible: !root.packageChecking && root.packageError.length > 0
+
+                    DankIcon {
+                        name: "error"
+                        size: 16
+                        color: Theme.error
+                        anchors.verticalCenter: parent.verticalCenter
+                    }
+
+                    StyledText {
+                        text: root.packageError
+                        color: Theme.error
+                        font.pixelSize: Theme.fontSizeSmall
+                        anchors.verticalCenter: parent.verticalCenter
+                    }
+                }
+
+                Row {
+                    anchors.centerIn: parent
+                    spacing: Theme.spacingS
+                    visible: !root.packageChecking && root.packageError.length === 0 && root.packageUpdates.length === 0
 
                     DankIcon {
                         name: "check_circle"
@@ -491,7 +702,7 @@ PluginComponent {
                     clip: true
                     model: root.packageUpdates
                     spacing: 2
-                    visible: !root.packageChecking && root.packageUpdates.length > 0
+                    visible: !root.packageChecking && root.packageError.length === 0 && root.packageUpdates.length > 0
 
                     delegate: Item {
                         width: ListView.view.width
@@ -681,7 +892,27 @@ PluginComponent {
                 Row {
                     anchors.centerIn: parent
                     spacing: Theme.spacingS
-                    visible: !root.flatpakChecking && root.flatpakUpdates.length === 0
+                    visible: !root.flatpakChecking && root.flatpakError.length > 0
+
+                    DankIcon {
+                        name: "error"
+                        size: 16
+                        color: Theme.error
+                        anchors.verticalCenter: parent.verticalCenter
+                    }
+
+                    StyledText {
+                        text: root.flatpakError
+                        color: Theme.error
+                        font.pixelSize: Theme.fontSizeSmall
+                        anchors.verticalCenter: parent.verticalCenter
+                    }
+                }
+
+                Row {
+                    anchors.centerIn: parent
+                    spacing: Theme.spacingS
+                    visible: !root.flatpakChecking && root.flatpakError.length === 0 && root.flatpakUpdates.length === 0
 
                     DankIcon {
                         name: "check_circle"
@@ -704,7 +935,7 @@ PluginComponent {
                     clip: true
                     model: root.flatpakUpdates
                     spacing: 2
-                    visible: !root.flatpakChecking && root.flatpakUpdates.length > 0
+                    visible: !root.flatpakChecking && root.flatpakError.length === 0 && root.flatpakUpdates.length > 0
 
                     delegate: Item {
                         width: ListView.view.width
